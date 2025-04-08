@@ -12,6 +12,7 @@ let localStream = null
 let localScreenStream = null
 let screenVideoTrack = null
 let screenAudioTrack = null
+let screenAudioOnlyStream = null
 let ws = null
 let peerConnections = {} // Словарь для хранения RTCPeerConnection для каждого пира
 let myId = null // Наш ID, полученный от сервера
@@ -390,33 +391,73 @@ function createPeerConnection(peerId) {
 			return
 		}
 		const stream = event.streams[0]
+		const trackKind = event.track.kind
 
-		if (event.track.kind === 'audio') {
+		if (trackKind === 'audio') {
 			const cardId = `participant-${peerId}`
+			const micAudioId = `audio-${peerId}`
+			const screenAudioId = `screen-audio-${peerId}`
 			let audioCard = document.getElementById(cardId)
 
+			let micAudioElement = document.getElementById(micAudioId)
+
 			if (!audioCard) {
-				console.log(`Создание аудио карточки для ${peerId}`)
+				console.log(
+					`Создание аудио карточки для ${peerId} и первого аудио элемента (микрофон)`
+				)
 				audioCard = document.createElement('div')
 				audioCard.id = cardId
 				audioCard.classList.add('participant-card')
 
 				const peerLabel = document.createElement('p')
 				peerLabel.textContent = `Участник ${peerId.substring(0, 6)}...`
+				audioCard.appendChild(peerLabel)
 
 				const remoteAudio = document.createElement('audio')
 				remoteAudio.autoplay = true
-				remoteAudio.id = `audio-${peerId}`
+				remoteAudio.id = micAudioId
 				remoteAudio.srcObject = stream
-
-				audioCard.appendChild(peerLabel)
 				audioCard.appendChild(remoteAudio)
 				remoteAudioContainer.appendChild(audioCard)
 			} else {
-				const remoteAudio = audioCard.querySelector('audio')
-				if (remoteAudio) remoteAudio.srcObject = stream
+				if (!micAudioElement) {
+					console.log(
+						`Карточка для ${peerId} есть, но нет аудио микрофона. Создаем.`
+					)
+					const remoteAudio = document.createElement('audio')
+					remoteAudio.autoplay = true
+					remoteAudio.id = micAudioId
+					remoteAudio.srcObject = stream
+					audioCard.appendChild(remoteAudio)
+				} else {
+					let screenAudioElement = document.getElementById(screenAudioId)
+					if (!screenAudioElement) {
+						console.log(
+							`Создание ВТОРОГО аудио элемента (звук экрана) для ${peerId}`
+						)
+						const screenAudioLabel = document.createElement('span')
+						screenAudioLabel.textContent = 'Звук с экрана: '
+						screenAudioLabel.style.fontSize = '0.8em'
+
+						screenAudioElement = document.createElement('audio')
+						screenAudioElement.autoplay = true
+						screenAudioElement.id = screenAudioId
+						screenAudioElement.srcObject = stream
+
+						micAudioElement.insertAdjacentElement(
+							'afterend',
+							screenAudioElement
+						)
+						micAudioElement.insertAdjacentElement('afterend', screenAudioLabel)
+					} else {
+						console.log(
+							`Обновление потока для существующего аудио элемента (звук экрана) для ${peerId}`
+						)
+						screenAudioElement.srcObject = stream
+					}
+				}
 			}
-		} else if (event.track.kind === 'video') {
+		} else if (trackKind === 'video') {
 			const containerId = `video-container-${peerId}`
 			let videoContainer = document.getElementById(containerId)
 			if (!videoContainer) {
@@ -468,15 +509,33 @@ function createPeerConnection(peerId) {
 		)
 	}
 
-	// Добавляем локальный ВИДЕО трек экрана, если он активен
-	if (isSharingScreen && screenVideoTrack) {
-		try {
-			pc.addTrack(screenVideoTrack, localScreenStream)
-		} catch (error) {
-			console.error(
-				`Ошибка добавления видео трека экрана для ${peerId}:`,
-				error
-			)
+	// Добавляем локальные треки ЭКРАНА, если демонстрация активна
+	if (isSharingScreen) {
+		if (screenVideoTrack) {
+			try {
+				console.log(
+					`Добавление существующего ВИДЕО трека экрана к новому соединению с ${peerId}`
+				)
+				pc.addTrack(screenVideoTrack, localScreenStream)
+			} catch (error) {
+				console.error(
+					`Ошибка добавления существующего видео трека экрана для ${peerId}:`,
+					error
+				)
+			}
+		}
+		if (screenAudioTrack && screenAudioOnlyStream) {
+			try {
+				console.log(
+					`Добавление существующего АУДИО трека экрана (из отдельного стрима) к новому соединению с ${peerId}`
+				)
+				pc.addTrack(screenAudioTrack, screenAudioOnlyStream)
+			} catch (error) {
+				console.error(
+					`Ошибка добавления существующего аудио трека экрана для ${peerId}:`,
+					error
+				)
+			}
 		}
 	}
 
@@ -522,10 +581,14 @@ async function startScreenShare() {
 		}
 		if (screenAudioTrack) {
 			console.log('Аудио трек экрана ПОЛУЧЕН.')
+			screenAudioOnlyStream = new MediaStream()
+			screenAudioOnlyStream.addTrack(screenAudioTrack)
+			console.log('Создан отдельный MediaStream для аудио трека экрана.')
 		} else {
 			console.warn(
 				'Аудио трек экрана НЕ получен (возможно, не поддерживается или не разрешен).'
 			)
+			screenAudioOnlyStream = null
 		}
 
 		createLocalScreenPreview()
@@ -540,9 +603,11 @@ async function startScreenShare() {
 			try {
 				console.log(`Добавление видео трека экрана к соединению с ${peerId}`)
 				pc.addTrack(screenVideoTrack, localScreenStream)
-				if (screenAudioTrack) {
-					console.log(`Добавление АУДИО трека экрана к соединению с ${peerId}`)
-					pc.addTrack(screenAudioTrack, localScreenStream)
+				if (screenAudioTrack && screenAudioOnlyStream) {
+					console.log(
+						`Добавление АУДИО трека экрана (из отдельного стрима) к соединению с ${peerId}`
+					)
+					pc.addTrack(screenAudioTrack, screenAudioOnlyStream)
 				}
 			} catch (error) {
 				console.error(
@@ -559,6 +624,9 @@ async function startScreenShare() {
 		if (screenAudioTrack) {
 			screenAudioTrack.onended = () => {
 				console.log('Аудио трек экрана остановлен пользователем (onended).')
+				if (!isSharingScreen) {
+					stopScreenShare(false)
+				}
 			}
 		}
 	} catch (error) {
@@ -571,6 +639,7 @@ async function startScreenShare() {
 		screenVideoTrack = null
 		screenAudioTrack = null
 		localScreenStream = null
+		screenAudioOnlyStream = null
 	}
 }
 
@@ -596,6 +665,7 @@ function stopScreenShare(stopTracks = true) {
 	screenVideoTrack = null
 	screenAudioTrack = null
 	localScreenStream = null
+	screenAudioOnlyStream = null
 
 	for (const peerId in peerConnections) {
 		const pc = peerConnections[peerId]
