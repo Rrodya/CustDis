@@ -3,32 +3,105 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>Голосовой чат</title>
+		<title>Голосовой чат + Демонстрация экрана</title>
 		<style>
 			body {
 				font-family: sans-serif;
 				padding: 20px;
+				display: flex;
+				flex-direction: column;
+				gap: 15px;
 			}
-			button {
-				padding: 10px 20px;
+			.controls button {
+				padding: 10px 15px;
 				font-size: 16px;
 				cursor: pointer;
+				margin-right: 10px;
 			}
 			#status {
-				margin-top: 15px;
 				font-style: italic;
+			}
+			.media-container {
+				display: flex; /* Располагаем аудио и видео рядом */
+				gap: 20px;
+				flex-wrap: wrap; /* Перенос на новую строку при нехватке места */
+			}
+			#remoteAudioContainer,
+			#remoteVideoContainer {
+				border: 1px solid #ccc;
+				padding: 15px;
+				min-height: 100px;
+				flex: 1; /* Позволяем контейнерам расти */
+				min-width: 250px; /* Минимальная ширина */
+			}
+			#remoteAudioContainer h2,
+			#remoteVideoContainer h2 {
+				margin-top: 0;
+				font-size: 1.1em;
+				color: #555;
 			}
 			#remoteAudioContainer audio {
 				display: block;
 				margin-top: 10px;
+				width: 100%;
+			}
+			#remoteVideoContainer video {
+				display: block;
+				margin-top: 10px;
+				width: 100%; /* Видео занимает всю ширину контейнера */
+				max-width: 400px; /* Ограничим максимальную ширину */
+				background-color: #eee;
+			}
+			/* Стили для контейнера видео и кнопки fullscreen */
+			.peer-video {
+				position: relative; /* Для позиционирования кнопки */
+				margin-bottom: 15px; /* Отступ снизу */
+			}
+			.peer-video p {
+				margin: 0 0 5px 0;
+				font-size: 0.9em;
+				color: #333;
+			}
+			.fullscreen-btn {
+				position: absolute;
+				bottom: 8px;
+				right: 8px;
+				padding: 4px 8px;
+				font-size: 12px;
+				cursor: pointer;
+				z-index: 10; /* Поверх видео */
+				background-color: rgba(0, 0, 0, 0.5);
+				color: white;
+				border: none;
+				border-radius: 3px;
+				opacity: 0.7;
+				transition: opacity 0.2s ease-in-out;
+			}
+			.peer-video:hover .fullscreen-btn {
+				opacity: 1;
 			}
 		</style>
 	</head>
 	<body>
-		<h1>Голосовой чат</h1>
-		<button id="connectButton">Подключиться</button>
+		<h1>Голосовой чат + Демонстрация экрана</h1>
+
+		<div class="controls">
+			<button id="connectButton">Подключиться</button>
+			<button id="shareScreenButton" disabled>Поделиться экраном</button>
+		</div>
+
 		<div id="status">Статус: Не подключен</div>
-		<div id="remoteAudioContainer"></div>
+
+		<div class="media-container">
+			<div id="remoteAudioContainer">
+				<h2>Голоса собеседников</h2>
+				<!-- Аудио элементы будут добавлены сюда -->
+			</div>
+			<div id="remoteVideoContainer">
+				<h2>Экраны собеседников</h2>
+				<!-- Видео элементы будут добавлены сюда -->
+			</div>
+		</div>
 
 		<script src="app.js"></script>
 	</body>

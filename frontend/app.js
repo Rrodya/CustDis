@@ -2,14 +2,19 @@
 console.log('app.js загружен')
 
 const connectButton = document.getElementById('connectButton')
+const shareScreenButton = document.getElementById('shareScreenButton')
 const statusDiv = document.getElementById('status')
 const remoteAudioContainer = document.getElementById('remoteAudioContainer')
+const remoteVideoContainer = document.getElementById('remoteVideoContainer')
 
 let localStream = null
+let localScreenStream = null
+let screenTrack = null
 let ws = null
 let peerConnections = {} // Словарь для хранения RTCPeerConnection для каждого пира
 let myId = null // Наш ID, полученный от сервера
 let isConnected = false
+let isSharingScreen = false
 
 // --- WebSocket ---
 function connectWebSocket() {
@@ -25,8 +30,7 @@ function connectWebSocket() {
 		statusDiv.textContent = 'Статус: Подключен к сигнализации. Ожидание ID...'
 		isConnected = true
 		connectButton.textContent = 'Отключиться'
-		// Запрос медиа и инициация WebRTC теперь происходит после получения 'welcome'
-		// requestMediaPermissions();
+		shareScreenButton.disabled = false
 	}
 
 	ws.onmessage = event => {
@@ -61,6 +65,9 @@ function connectWebSocket() {
 			statusDiv.textContent = 'Статус: Отключен'
 			isConnected = false
 			connectButton.textContent = 'Подключиться'
+			shareScreenButton.disabled = true
+			shareScreenButton.textContent = 'Поделиться экраном'
+			isSharingScreen = false
 			cleanupWebRTC()
 			myId = null // Сбрасываем ID
 		}
@@ -175,11 +182,14 @@ async function handleSignalingData(data) {
 				console.log(`PeerConnection для ${payload} закрыт.`)
 				delete peerConnections[payload]
 			}
-			const audioEl = document.getElementById(`audio-${payload}`)
-			if (audioEl) {
-				audioEl.remove()
-				console.log(`Аудио элемент для ${payload} удален.`)
-			}
+			const audioContainer = document.getElementById(
+				`audio-container-${payload}`
+			)
+			if (audioContainer) audioContainer.remove()
+			const videoContainer = document.getElementById(
+				`video-container-${payload}`
+			)
+			if (videoContainer) videoContainer.remove()
 			break
 
 		case 'offer':
@@ -246,24 +256,24 @@ async function handleSignalingData(data) {
 			pc = peerConnections[senderId]
 			if (pc) {
 				try {
-					if (payload) {
-						// Убедимся, что кандидат не null
+					if (payload && pc.remoteDescription) {
 						await pc.addIceCandidate(new RTCIceCandidate(payload))
 						console.log(`ICE candidate от ${senderId} добавлен.`)
-					} else {
+					} else if (!payload) {
 						console.log(
 							`Получен пустой ICE candidate от ${senderId}. Игнорируем.`
 						)
+					} else if (!pc.remoteDescription) {
+						console.warn(
+							`Получен candidate от ${senderId}, но remote description еще не установлен. Игнорируем (или кешируем).`
+						)
+						// TODO: Можно реализовать кеширование кандидатов
 					}
 				} catch (error) {
-					// Игнорируем ошибки 'Error: Cannot add ICE candidate before setting remote description' и т.п.,
-					// так как кандидаты могут приходить раньше установки описания
-					if (!error.message.includes('before setting remote description')) {
-						console.error(
-							`Ошибка при добавлении ICE candidate от ${senderId}:`,
-							error
-						)
-					}
+					console.error(
+						`Ошибка при добавлении ICE candidate от ${senderId}:`,
+						error
+					)
 				}
 			} else {
 				console.warn(
@@ -296,15 +306,47 @@ function createPeerConnection(peerId) {
 		iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
 	})
 
+	// Обработчик для ре-негоциации (добавление/удаление треков)
+	pc.onnegotiationneeded = async () => {
+		console.log(`Сработало onnegotiationneeded для ${peerId}`)
+		// Защита от слишком частых вызовов или race condition
+		if (pc.signalingState !== 'stable') {
+			console.warn(
+				`onnegotiationneeded вызван в нестабильном состоянии (${pc.signalingState}) для ${peerId}, игнорируем.`
+			)
+			return
+		}
+		try {
+			// Небольшая задержка перед созданием offer может помочь избежать race conditions
+			await new Promise(resolve => setTimeout(resolve, 100))
+			const offer = await pc.createOffer()
+			// Проверим еще раз состояние перед setLocalDescription
+			if (pc.signalingState !== 'stable') {
+				console.warn(
+					`Состояние изменилось на ${pc.signalingState} перед setLocalDescription для ${peerId}. Отмена offer.`
+				)
+				return
+			}
+			await pc.setLocalDescription(offer)
+			console.log(`Отправка renegotiation offer пиру ${peerId}`)
+			sendMessage({
+				type: 'offer',
+				payload: pc.localDescription,
+				targetId: peerId,
+			})
+		} catch (error) {
+			console.error(
+				`Ошибка при renegotiation (createOffer/setLocalDescription) для ${peerId}:`,
+				error
+			)
+		}
+	}
+
 	pc.onicecandidate = event => {
 		if (event.candidate) {
-			// Не отправляем кандидатов, пока не установлен remote description?
-			// Хотя спецификация позволяет это.
 			console.log(`Отправка ICE candidate для ${peerId}`)
 			sendMessage({
 				type: 'candidate',
-				// Иногда payload может быть объектом, иногда строкой sdpMid, sdpMLineIndex
-				// Отправляем весь объект event.candidate
 				payload: event.candidate,
 				targetId: peerId,
 			})
@@ -316,83 +358,269 @@ function createPeerConnection(peerId) {
 	pc.oniceconnectionstatechange = () => {
 		console.log(`ICE connection state для ${peerId}: ${pc.iceConnectionState}`)
 		if (
+			pc.iceConnectionState === 'connected' ||
+			pc.iceConnectionState === 'completed'
+		) {
+			statusDiv.textContent = `Статус: Соединено с ${peerId}`
+		}
+		if (
 			pc.iceConnectionState === 'failed' ||
 			pc.iceConnectionState === 'disconnected' ||
 			pc.iceConnectionState === 'closed'
 		) {
-			console.warn(`Соединение с ${peerId} разорвано или не удалось.`)
-			// Можно попытаться переподключиться (ICE restart) или просто убрать пира
-			const audioEl = document.getElementById(`audio-${peerId}`)
-			if (audioEl) audioEl.remove()
+			console.warn(
+				`Соединение с ${peerId} разорвано или не удалось (${pc.iceConnectionState}).`
+			)
+			// Закрываем и удаляем PC, а также связанные элементы
+			const audioContainer = document.getElementById(
+				`audio-container-${peerId}`
+			)
+			if (audioContainer) audioContainer.remove()
+			const videoContainer = document.getElementById(
+				`video-container-${peerId}`
+			)
+			if (videoContainer) videoContainer.remove()
 			if (peerConnections[peerId]) {
 				peerConnections[peerId].close()
 				delete peerConnections[peerId]
 			}
+			if (Object.keys(peerConnections).length === 0) {
+				statusDiv.textContent = 'Статус: Соединений нет'
+			}
 		}
-		// Обновление статуса можно добавить здесь
-		// statusDiv.textContent = `Статус: ${peerId} - ${pc.iceConnectionState}`;
 	}
 
 	pc.ontrack = event => {
-		console.log(`Получен трек от ${peerId}`, event.streams)
-		if (event.streams && event.streams[0]) {
-			const existingAudio = document.getElementById(`audio-${peerId}`)
-			if (existingAudio) {
+		console.log(
+			`Получен трек от ${peerId}, kind: ${event.track.kind}, stream:`,
+			event.streams[0]
+		)
+		if (!event.streams || !event.streams[0]) {
+			console.warn(`Событие ontrack для ${peerId} не содержит потоков.`)
+			return
+		}
+		const stream = event.streams[0]
+
+		if (event.track.kind === 'audio') {
+			const containerId = `audio-container-${peerId}`
+			let audioContainer = document.getElementById(containerId)
+			if (!audioContainer) {
+				console.log(`Создание аудио контейнера для ${peerId}`)
+				audioContainer = document.createElement('div')
+				audioContainer.id = containerId
+				audioContainer.classList.add('peer-audio') // Для возможных стилей
+
+				const peerLabel = document.createElement('p')
+				peerLabel.textContent = `Аудио от ${peerId.substring(0, 6)}...`
+				peerLabel.style.margin = '0 0 5px 0'
+				peerLabel.style.fontSize = '0.9em'
+
+				const remoteAudio = document.createElement('audio')
+				remoteAudio.autoplay = true
+				remoteAudio.id = `audio-${peerId}`
+
+				audioContainer.appendChild(peerLabel)
+				audioContainer.appendChild(remoteAudio)
+				remoteAudioContainer.appendChild(audioContainer)
+				remoteAudio.srcObject = stream // Устанавливаем поток после добавления в DOM
+			} else {
 				console.log(
 					`Аудио элемент для ${peerId} уже существует. Обновляем поток.`
 				)
-				existingAudio.srcObject = event.streams[0]
-			} else {
-				console.log(`Создание аудио элемента для ${peerId}`)
-				const remoteAudio = document.createElement('audio')
-				remoteAudio.srcObject = event.streams[0]
-				remoteAudio.autoplay = true
-				// remoteAudio.controls = true; // Можно убрать контролы для чата
-				remoteAudio.id = `audio-${peerId}`
-				remoteAudioContainer.appendChild(remoteAudio)
-				statusDiv.textContent = `Статус: Говорит ${peerId}`
+				const remoteAudio = audioContainer.querySelector('audio')
+				if (remoteAudio) remoteAudio.srcObject = stream
 			}
-		} else {
-			console.warn(`Событие ontrack для ${peerId} не содержит потоков.`)
+		} else if (event.track.kind === 'video') {
+			const containerId = `video-container-${peerId}`
+			let videoContainer = document.getElementById(containerId)
+			if (!videoContainer) {
+				console.log(`Создание видео контейнера для ${peerId}`)
+				videoContainer = document.createElement('div')
+				videoContainer.id = containerId
+				videoContainer.classList.add('peer-video') // Класс для стилизации
+				videoContainer.style.position = 'relative' // Для позиционирования кнопки
+
+				const peerLabel = document.createElement('p')
+				peerLabel.textContent = `Экран от ${peerId.substring(0, 6)}...`
+				peerLabel.style.margin = '0 0 5px 0'
+				peerLabel.style.fontSize = '0.9em'
+
+				const remoteVideo = document.createElement('video')
+				remoteVideo.autoplay = true
+				remoteVideo.playsinline = true
+				remoteVideo.muted = false
+				remoteVideo.id = `video-${peerId}`
+				remoteVideo.style.width = '100%' // Занимает ширину контейнера
+				remoteVideo.style.display = 'block'
+
+				const fullscreenButton = document.createElement('button')
+				fullscreenButton.textContent = 'На весь экран'
+				fullscreenButton.classList.add('fullscreen-btn')
+				fullscreenButton.dataset.videoId = `video-${peerId}` // Связываем с видео
+				// Стили кнопки лучше задать в CSS, но для примера:
+				fullscreenButton.style.position = 'absolute'
+				fullscreenButton.style.bottom = '10px'
+				fullscreenButton.style.right = '10px'
+				fullscreenButton.style.padding = '5px 8px'
+				fullscreenButton.style.fontSize = '12px'
+				fullscreenButton.style.cursor = 'pointer'
+				fullscreenButton.style.zIndex = '1' // Поверх видео
+
+				videoContainer.appendChild(peerLabel)
+				videoContainer.appendChild(remoteVideo)
+				videoContainer.appendChild(fullscreenButton)
+				remoteVideoContainer.appendChild(videoContainer)
+				remoteVideo.srcObject = stream // Устанавливаем поток
+			} else {
+				console.log(
+					`Видео элемент для ${peerId} уже существует. Обновляем поток.`
+				)
+				const remoteVideo = videoContainer.querySelector('video')
+				if (remoteVideo) remoteVideo.srcObject = stream
+			}
 		}
 	}
 
-	// Добавляем локальные треки, ЕСЛИ они уже есть
+	// Добавляем локальные АУДИО треки сразу
 	if (localStream) {
 		localStream.getTracks().forEach(track => {
 			try {
 				pc.addTrack(track, localStream)
-				console.log(`Локальный трек добавлен для ${peerId}`)
+				console.log(`Локальный аудио трек добавлен для ${peerId}`)
 			} catch (error) {
-				console.error(`Ошибка добавления трека для ${peerId}:`, error)
+				console.error(`Ошибка добавления аудио трека для ${peerId}:`, error)
 			}
 		})
 	} else {
 		console.warn(
-			`PeerConnection для ${peerId} создан, но локальный поток еще не готов.`
+			`PeerConnection для ${peerId} создан, но локальный аудио поток еще не готов.`
 		)
-		// Треки будут добавлены позже? WebRTC должен справиться, если offer/answer
-		// согласуются без треков сначала, а потом с ними (renegotiation).
+	}
+
+	// Добавляем локальный ВИДЕО трек, если мы уже шарим экран
+	if (isSharingScreen && screenTrack) {
+		try {
+			pc.addTrack(screenTrack, localScreenStream)
+			console.log(`Локальный видео (экран) трек добавлен для ${peerId}`)
+		} catch (error) {
+			console.error(
+				`Ошибка добавления видео трека экрана для ${peerId}:`,
+				error
+			)
+		}
 	}
 
 	peerConnections[peerId] = pc
 	return pc
 }
 
+// --- Демонстрация экрана ---
+
+async function startScreenShare() {
+	if (isSharingScreen) {
+		console.log('Уже идет демонстрация экрана.')
+		return
+	}
+	try {
+		localScreenStream = await navigator.mediaDevices.getDisplayMedia({
+			video: true, // Запрашиваем видео
+			audio: false, // Обычно звук с экрана не нужен, но можно запросить
+		})
+		console.log('Доступ к экрану получен.', localScreenStream)
+
+		screenTrack = localScreenStream.getVideoTracks()[0]
+		if (!screenTrack) {
+			throw new Error('Не удалось получить видео трек экрана.')
+		}
+
+		isSharingScreen = true
+		shareScreenButton.textContent = 'Остановить показ'
+		statusDiv.textContent = 'Статус: Идет демонстрация экрана'
+
+		// Добавляем трек ко всем существующим соединениям
+		for (const peerId in peerConnections) {
+			const pc = peerConnections[peerId]
+			try {
+				console.log(`Добавление трека экрана к соединению с ${peerId}`)
+				pc.addTrack(screenTrack, localScreenStream)
+				// pc.addTrack вызовет onnegotiationneeded, который отправит offer
+			} catch (error) {
+				console.error(
+					`Ошибка добавления трека экрана к PC для ${peerId}:`,
+					error
+				)
+			}
+		}
+
+		// Если пользователь остановит показ через UI браузера
+		screenTrack.onended = () => {
+			console.log('Демонстрация экрана остановлена пользователем (onended).')
+			stopScreenShare(false) // Остановить без повторной попытки остановки трека
+		}
+	} catch (error) {
+		console.error('Ошибка при запуске демонстрации экрана:', error)
+		statusDiv.textContent = `Статус: Ошибка демонстрации экрана - ${error.message}`
+		isSharingScreen = false // Сбрасываем флаг
+	}
+}
+
+function stopScreenShare(stopTracks = true) {
+	if (!isSharingScreen) {
+		console.log('Демонстрация экрана не активна.')
+		return
+	}
+	console.log('Остановка демонстрации экрана...')
+	isSharingScreen = false
+	shareScreenButton.textContent = 'Поделиться экраном'
+	statusDiv.textContent = 'Статус: Демонстрация экрана остановлена'
+
+	if (stopTracks && screenTrack) {
+		console.log('Остановка локального трека экрана.')
+		screenTrack.stop() // Останавливаем трек
+	}
+	screenTrack = null
+	localScreenStream = null
+
+	// Удаляем трек из всех соединений
+	for (const peerId in peerConnections) {
+		const pc = peerConnections[peerId]
+		const senders = pc.getSenders() // Получаем все RTCRtpSender
+		senders.forEach(sender => {
+			if (sender.track && sender.track.kind === 'video') {
+				// Находим видео sender
+				try {
+					console.log(`Удаление трека экрана из соединения с ${peerId}`)
+					pc.removeTrack(sender)
+					// pc.removeTrack вызовет onnegotiationneeded
+				} catch (error) {
+					console.error(
+						`Ошибка удаления трека экрана из PC для ${peerId}:`,
+						error
+					)
+				}
+			}
+		})
+	}
+	// На удаленной стороне видео должно пропасть после ре-негоциации,
+	// но можно добавить явное сообщение, если будут проблемы.
+}
+
+// --- Очистка ---
+
 function cleanupWebRTC() {
 	console.log('Очистка WebRTC ресурсов...')
-	myId = null // Сбрасываем ID
-	// Останавливаем локальный поток
+	stopScreenShare(true) // Останавливаем показ экрана, если он был активен
+	myId = null
 	if (localStream) {
 		localStream.getTracks().forEach(track => track.stop())
 		localStream = null
-		console.log('Локальный поток остановлен.')
+		console.log('Локальный аудио поток остановлен.')
 	}
 
-	// Закрываем все peer connections
 	for (const peerId in peerConnections) {
 		if (peerConnections[peerId]) {
-			peerConnections[peerId].onicecandidate = null // Убираем обработчики
+			peerConnections[peerId].onnegotiationneeded = null
+			peerConnections[peerId].onicecandidate = null
 			peerConnections[peerId].ontrack = null
 			peerConnections[peerId].oniceconnectionstatechange = null
 			peerConnections[peerId].close()
@@ -401,12 +629,12 @@ function cleanupWebRTC() {
 	}
 	peerConnections = {}
 
-	// Удаляем аудио элементы
-	remoteAudioContainer.innerHTML = ''
-	console.log('Удаленные аудио элементы удалены.')
+	remoteAudioContainer.innerHTML = '<h2>Голоса собеседников</h2>' // Восстанавливаем заголовок
+	remoteVideoContainer.innerHTML = '<h2>Экраны собеседников</h2>' // Восстанавливаем заголовок
+	console.log('Удаленные аудио и видео элементы удалены.')
 }
 
-// --- Управление подключением ---
+// --- Управление подключением и UI ---
 
 function connect() {
 	if (isConnected) return
@@ -417,20 +645,18 @@ function connect() {
 
 function disconnect() {
 	console.log('Нажата кнопка Отключиться или произошло отключение')
-	const explicitDisconnect = isConnected // Запоминаем, было ли инициировано пользователем
+	const explicitDisconnect = isConnected
 	if (ws) {
-		// Не меняем isConnected здесь, ждем onclose
-		ws.close(1000, 'Пользователь отключился') // Код 1000 - нормальное закрытие
+		ws.close(1000, 'Пользователь отключился')
 		ws = null
 	}
-	// Очистку (cleanupWebRTC) теперь делает ws.onclose
-	// Если ws уже был null, или закрытие не было явным,
-	// то onclose мог не сработать или сработал из-за ошибки.
-	// На всякий случай, если не были подключены, делаем cleanup.
 	if (!explicitDisconnect) {
 		statusDiv.textContent = 'Статус: Отключен'
 		isConnected = false
 		connectButton.textContent = 'Подключиться'
+		shareScreenButton.disabled = true
+		shareScreenButton.textContent = 'Поделиться экраном'
+		isSharingScreen = false
 		cleanupWebRTC()
 		myId = null
 	}
@@ -441,5 +667,37 @@ connectButton.addEventListener('click', () => {
 		disconnect()
 	} else {
 		connect()
+	}
+})
+
+shareScreenButton.addEventListener('click', () => {
+	if (isSharingScreen) {
+		stopScreenShare()
+	} else {
+		startScreenShare()
+	}
+})
+
+// --- Обработчик Fullscreen ---
+remoteVideoContainer.addEventListener('click', event => {
+	if (event.target && event.target.classList.contains('fullscreen-btn')) {
+		const videoId = event.target.dataset.videoId
+		const videoElement = document.getElementById(videoId)
+		if (videoElement && videoElement.requestFullscreen) {
+			videoElement.requestFullscreen().catch(err => {
+				console.error(
+					`Ошибка при попытке входа в полноэкранный режим для ${videoId}:`,
+					err
+				)
+				alert(`Не удалось войти в полноэкранный режим: ${err.message}`)
+			})
+		} else if (videoElement) {
+			console.warn(
+				'Метод requestFullscreen не поддерживается этим элементом или браузером.'
+			)
+			alert('Полноэкранный режим не поддерживается.')
+		} else {
+			console.error(`Видео элемент с ID ${videoId} не найден для fullscreen.`)
+		}
 	}
 })
