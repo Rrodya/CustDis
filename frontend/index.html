@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ru">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Голосовой чат</title>
+		<style>
+			body {
+				font-family: sans-serif;
+				padding: 20px;
+			}
+			button {
+				padding: 10px 20px;
+				font-size: 16px;
+				cursor: pointer;
+			}
+			#status {
+				margin-top: 15px;
+				font-style: italic;
+			}
+			#remoteAudioContainer audio {
+				display: block;
+				margin-top: 10px;
+			}
+		</style>
+	</head>
+	<body>
+		<h1>Голосовой чат</h1>
+		<button id="connectButton">Подключиться</button>
+		<div id="status">Статус: Не подключен</div>
+		<div id="remoteAudioContainer"></div>
+
+		<script src="app.js"></script>
+	</body>
+</html>
