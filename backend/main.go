@@ -22,7 +22,7 @@ const (
 	pingPeriod = (pongWait * 9) / 10
 
 	// Максимальный размер сообщения, разрешенный от пира.
-	maxMessageSize = 1024 * 4 // Увеличим размер для SDP
+	maxMessageSize = 1024 * 16 // Увеличим до 16KB для SDP с видео
 )
 
 var upgrader = websocket.Upgrader{
